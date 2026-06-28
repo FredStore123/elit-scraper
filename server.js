@@ -1,7 +1,6 @@
 /**
- * Elit Scraper Service – v4
- * Na login: navigeert via het menu zoals een echte gebruiker.
- * Geen hardcoded URLs meer naar app 111.
+ * Elit Scraper Service – v5
+ * Navigatie: Home → Training & Stages (menu) → klik "Inschrijvingen" kaart → data ophalen
  */
 'use strict';
 
@@ -28,185 +27,120 @@ async function launchBrowser() {
 }
 
 async function doLogin(page, username, password) {
-  log('INFO', 'Loginpagina laden...');
+  log('INFO', 'Login...');
   await page.goto(LOGIN_URL, { waitUntil: 'networkidle2', timeout: 30000 });
   await page.waitForSelector('input', { timeout: 10000 });
 
   for (const sel of ['input[name="P100_USERNAME"]','#P100_USERNAME','input[type="text"]']) {
-    try { await page.waitForSelector(sel,{timeout:2000}); await page.click(sel,{clickCount:3}); await page.type(sel,username,{delay:40}); log('INFO',`User: ${sel}`); break; } catch(e){}
+    try { await page.waitForSelector(sel,{timeout:2000}); await page.click(sel,{clickCount:3}); await page.type(sel,username,{delay:40}); break; } catch(e){}
   }
   for (const sel of ['input[name="P100_PASSWORD"]','#P100_PASSWORD','input[type="password"]']) {
-    try { await page.waitForSelector(sel,{timeout:2000}); await page.click(sel,{clickCount:3}); await page.type(sel,password,{delay:40}); log('INFO',`Pass: ${sel}`); break; } catch(e){}
+    try { await page.waitForSelector(sel,{timeout:2000}); await page.click(sel,{clickCount:3}); await page.type(sel,password,{delay:40}); break; } catch(e){}
   }
   let clicked = false;
   for (const sel of ['button[type="submit"]','input[type="submit"]','button.t-Button--hot','button']) {
     try { await page.waitForSelector(sel,{timeout:2000}); await page.click(sel); clicked=true; break; } catch(e){}
   }
   if (!clicked) await page.keyboard.press('Enter');
-
   await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 25000 });
-  const url = page.url();
-  log('INFO', `URL na login: ${url}`);
-  if (url.includes('LOGIN_DESKTOP')) throw new Error('Login mislukt. Controleer gebruikersnaam en wachtwoord.');
-  log('INFO', 'Login geslaagd!');
+  if (page.url().includes('LOGIN_DESKTOP')) throw new Error('Login mislukt. Controleer gebruikersnaam en wachtwoord.');
+  log('INFO', `Ingelogd. URL: ${page.url()}`);
   await wait(2000);
 }
 
-// Navigeer naar inschrijvingen door op een menulink te klikken
-async function navigateToRegistrations(page) {
-  log('INFO', 'Zoeken naar inschrijvingen in menu...');
-
-  // Haal alle links op van de huidige pagina
-  const links = await page.evaluate(() => {
-    return Array.from(document.querySelectorAll('a[href]')).map(a => ({
-      text: (a.innerText || a.textContent || '').trim().toLowerCase(),
-      href: a.href,
-    }));
+async function navigateToInschrijvingen(page) {
+  // Stap 1: klik op "Training & stages" in het linkermenu
+  log('INFO', 'Stap 1: klik Training & stages in menu...');
+  
+  const trainingLink = await page.evaluate(() => {
+    const links = Array.from(document.querySelectorAll('a[href]'));
+    for (const a of links) {
+      const text = (a.innerText || a.textContent || '').trim().toLowerCase();
+      const href = a.href || '';
+      if (text.includes('training') || href.includes('f?p=111:2:') || href.includes('f?p=111:1:')) {
+        return a.href;
+      }
+    }
+    return null;
   });
 
-  log('INFO', `Totaal links op pagina: ${links.length}`);
-  links.slice(0, 20).forEach(l => log('INFO', `  Link: "${l.text}" → ${l.href}`));
+  if (!trainingLink) throw new Error('Link naar Training & Stages niet gevonden in menu.');
+  
+  log('INFO', `Training & Stages link: ${trainingLink}`);
+  await page.goto(trainingLink, { waitUntil: 'networkidle2', timeout: 30000 });
+  await wait(2500);
+  log('INFO', `Na Training & Stages: ${page.url()}`);
 
-  // Zoek de beste match
-  const keywords = ['inschrijv', 'training', 'lessen', 'stages', 'cursus', 'les ', 'stage'];
-  let bestLink = null;
+  // Stap 2: klik op de "Inschrijvingen" kaart (Planning sectie)
+  log('INFO', 'Stap 2: klik op Inschrijvingen kaart...');
 
-  for (const kw of keywords) {
-    bestLink = links.find(l => l.text.includes(kw) || (l.href.includes('p=111') && !l.href.includes('LOGIN')));
-    if (bestLink) { log('INFO', `Match op "${kw}": ${bestLink.href}`); break; }
-  }
+  const clicked = await page.evaluate(() => {
+    // Zoek alle klikbare elementen met tekst "Inschrijvingen"
+    const allElements = Array.from(document.querySelectorAll('a, button, div[onclick], span[onclick]'));
+    for (const el of allElements) {
+      const text = (el.innerText || el.textContent || '').trim();
+      if (text === 'Inschrijvingen' || text.toLowerCase() === 'inschrijvingen') {
+        el.click();
+        return true;
+      }
+    }
+    return false;
+  });
 
-  if (!bestLink) {
-    // Fallback: alle links met p=111 in href
-    bestLink = links.find(l => l.href.includes('f?p=111'));
-    if (bestLink) log('INFO', `Fallback p=111 link: ${bestLink.href}`);
-  }
-
-  if (bestLink) {
-    log('INFO', `Navigeer naar: ${bestLink.href}`);
-    await page.goto(bestLink.href, { waitUntil: 'networkidle2', timeout: 30000 });
-    await wait(3000);
-    log('INFO', `Na navigatie: ${page.url()}`);
-    return true;
-  }
-
-  log('WARN', 'Geen inschrijvingen-link gevonden in menu.');
-  return false;
-}
-
-// Debug: login + screenshot na login (vóór navigatie naar inschrijvingen)
-async function debugAfterLogin(username, password) {
-  const browser = await launchBrowser();
-  try {
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1440, height: 900 });
-    await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-
-    await doLogin(page, username, password);
-
-    // Screenshot DIRECT na login (startpagina)
-    const screenshotLogin = await page.screenshot({ encoding: 'base64', fullPage: false });
-    const urlLogin = page.url();
-
-    // Alle links verzamelen
-    const allLinks = await page.evaluate(() =>
-      Array.from(document.querySelectorAll('a[href]')).map(a => ({
-        text: (a.innerText || a.textContent || '').trim(),
-        href: a.href,
-      })).filter(l => l.text || l.href).slice(0, 50)
-    );
-
-    const headings = await page.evaluate(() =>
-      Array.from(document.querySelectorAll('h1,h2,h3,h4,.t-NavigationBar-link,.t-TreeNav-label'))
-        .map(el => el.innerText.trim()).filter(t => t).slice(0, 20)
-    );
-
-    const bodyText = await page.evaluate(() => document.body.innerText.slice(0, 800));
-
-    // Nu ook proberen te navigeren naar inschrijvingen
-    const navSuccess = await navigateToRegistrations(page);
-    const screenshotNav = await page.screenshot({ encoding: 'base64', fullPage: false });
-    const urlNav = page.url();
-    const bodyNav = await page.evaluate(() => document.body.innerText.slice(0, 800));
-    const tablesNav = await page.evaluate(() => {
-      return Array.from(document.querySelectorAll('table')).map(t => ({
-        rows: t.querySelectorAll('tr').length,
-        headers: Array.from(t.querySelectorAll('th')).map(th => th.innerText.trim()),
-      }));
+  if (!clicked) {
+    // Fallback: zoek link die p=111:44 bevat
+    log('WARN', 'Inschrijvingen kaart niet gevonden via tekst, zoek via href...');
+    const inschLink = await page.evaluate(() => {
+      for (const a of document.querySelectorAll('a[href]')) {
+        if (a.href.includes('p=111:44') || a.href.includes(':44:')) return a.href;
+      }
+      return null;
     });
-
-    await browser.close();
-    return {
-      success: true,
-      // Na login
-      url_login: urlLogin,
-      screenshot_login: screenshotLogin,
-      headings,
-      all_links: allLinks,
-      body_login: bodyText,
-      // Na navigatie
-      nav_success: navSuccess,
-      url_nav: urlNav,
-      screenshot_nav: screenshotNav,
-      body_nav: bodyNav,
-      tables_nav: tablesNav,
-    };
-  } catch(err) {
-    try { await browser.close(); } catch(e) {}
-    throw err;
+    if (inschLink) {
+      log('INFO', `Inschrijvingen href: ${inschLink}`);
+      await page.goto(inschLink, { waitUntil: 'networkidle2', timeout: 30000 });
+    } else {
+      throw new Error('Knop "Inschrijvingen" niet gevonden op de Training & Stages pagina.');
+    }
+  } else {
+    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => wait(3000));
   }
-}
 
-// Scrape
-async function scrapeElit(username, password) {
-  log('INFO', `Start scrape voor: ${username}`);
-  const browser = await launchBrowser();
-  try {
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1440, height: 900 });
-    await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-
-    await doLogin(page, username, password);
-    await navigateToRegistrations(page);
-
-    const allData = await extractAllTabs(page);
-    log('INFO', `Totaal: ${allData.length} rijen`);
-
-    const htmlFallback = allData.length === 0 ? await page.content() : null;
-    await browser.close();
-    return { success: true, registrations: allData, html_fallback: htmlFallback, url: page.url(), count: allData.length };
-  } catch(err) {
-    log('ERROR', err.message);
-    try { await browser.close(); } catch(e) {}
-    throw err;
-  }
+  await wait(2500);
+  log('INFO', `Na Inschrijvingen klik: ${page.url()}`);
 }
 
 async function extractAllTabs(page) {
   let all = [];
+
+  // Lees actieve tab
   const b1 = await extractTable(page);
-  log('INFO', `Tab 1: ${b1.length} rijen`);
+  log('INFO', `Actieve tab: ${b1.length} rijen`);
   all = all.concat(b1);
 
-  const tabEls = await page.$$([
+  // Zoek inactieve tabs (Lessen / Stages)
+  const inactiveTabs = await page.$$([
     '.t-TabsRegion-items li:not(.is-active) a',
     '.t-Tabs-item:not(.is-active) a',
     '[role="tab"]:not([aria-selected="true"])',
+    'li.t-NavTabs-item:not(.is-active) a',
   ].join(', '));
 
-  log('INFO', `Extra tabs: ${tabEls.length}`);
-  for (const tab of tabEls) {
+  log('INFO', `Extra tabs: ${inactiveTabs.length}`);
+
+  for (const tab of inactiveTabs) {
     try {
-      const txt = await page.evaluate(el => el.innerText || '', tab);
-      log('INFO', `Tab: "${txt.trim()}"`);
+      const txt = await page.evaluate(el => (el.innerText||el.textContent||'').trim(), tab);
+      log('INFO', `Tab klikken: "${txt}"`);
       await tab.click();
       await wait(2500);
       const batch = await extractTable(page);
-      log('INFO', `  → ${batch.length} rijen`);
+      log('INFO', `Tab "${txt}": ${batch.length} rijen`);
       all = all.concat(batch);
     } catch(e) { log('WARN', `Tab fout: ${e.message}`); }
   }
 
+  // Dedup
   const seen = new Set();
   return all.filter(r => { const k=JSON.stringify(r); if(seen.has(k)) return false; seen.add(k); return true; });
 }
@@ -216,10 +150,10 @@ async function extractTable(page) {
     const rows = [];
     document.querySelectorAll('table').forEach(table => {
       const headers = [];
-      table.querySelectorAll('thead th, thead td').forEach(h => { if(h.innerText.trim()) headers.push(h.innerText.trim()); });
+      table.querySelectorAll('thead th, thead td').forEach(h => { const t=h.innerText.trim(); if(t) headers.push(t); });
       if (headers.length === 0) {
         const fr = table.querySelector('tr');
-        if (fr) fr.querySelectorAll('th,td').forEach(c => { if(c.innerText.trim()) headers.push(c.innerText.trim()); });
+        if (fr) fr.querySelectorAll('th,td').forEach(c => { const t=c.innerText.trim(); if(t) headers.push(t); });
       }
       if (headers.length < 2) return;
       table.querySelectorAll('tbody tr').forEach(tr => {
@@ -234,56 +168,110 @@ async function extractTable(page) {
   });
 }
 
+async function scrapeElit(username, password) {
+  log('INFO', `Scrape starten voor: ${username}`);
+  const browser = await launchBrowser();
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1440, height: 900 });
+    await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+
+    await doLogin(page, username, password);
+    await navigateToInschrijvingen(page);
+
+    const allData = await extractAllTabs(page);
+    log('INFO', `Totaal: ${allData.length} rijen`);
+
+    const htmlFallback = allData.length === 0 ? await page.content() : null;
+    await browser.close();
+    return { success: true, registrations: allData, html_fallback: htmlFallback, url: page.url(), count: allData.length };
+  } catch(err) {
+    log('ERROR', err.message);
+    try { await browser.close(); } catch(e) {}
+    throw err;
+  }
+}
+
+async function debugScrape(username, password) {
+  const browser = await launchBrowser();
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1440, height: 900 });
+    await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+
+    await doLogin(page, username, password);
+    const screenshotLogin = await page.screenshot({ encoding: 'base64' });
+    const urlLogin = page.url();
+    const allLinks = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('a[href]')).map(a => ({
+        text: (a.innerText||a.textContent||'').trim(), href: a.href
+      })).filter(l=>l.text||l.href).slice(0,50)
+    );
+
+    let navSuccess = false, screenshotNav = null, urlNav = null, tablesNav = [], bodyNav = '', errorMsg = '';
+    try {
+      await navigateToInschrijvingen(page);
+      navSuccess = true;
+      screenshotNav = await page.screenshot({ encoding: 'base64' });
+      urlNav = page.url();
+      bodyNav = await page.evaluate(() => document.body.innerText.slice(0, 800));
+      tablesNav = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('table')).map(t => ({
+          rows: t.querySelectorAll('tr').length,
+          headers: Array.from(t.querySelectorAll('th')).map(th=>th.innerText.trim()),
+        }))
+      );
+    } catch(e) {
+      errorMsg = e.message;
+      screenshotNav = await page.screenshot({ encoding: 'base64' });
+      urlNav = page.url();
+    }
+
+    await browser.close();
+    return { success: true, url_login: urlLogin, screenshot_login: screenshotLogin, all_links: allLinks,
+             nav_success: navSuccess, nav_error: errorMsg, url_nav: urlNav, screenshot_nav: screenshotNav,
+             body_nav: bodyNav, tables_nav: tablesNav };
+  } catch(err) {
+    try { await browser.close(); } catch(e) {}
+    throw err;
+  }
+}
+
 // HTTP Server
 const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
-    res.writeHead(200, {'Content-Type':'application/json'});
-    res.end(JSON.stringify({ status:'ok', version:'4.0' }));
-    return;
+    res.writeHead(200,{'Content-Type':'application/json'});
+    res.end(JSON.stringify({status:'ok',version:'5.0'})); return;
   }
-  if (req.method !== 'POST') {
-    res.writeHead(404); res.end(JSON.stringify({error:'Not found'})); return;
-  }
+  if (req.method !== 'POST') { res.writeHead(404); res.end(JSON.stringify({error:'Not found'})); return; }
 
   let body = '';
   req.on('data', chunk => { body += chunk; });
   req.on('end', async () => {
     let payload;
-    try { payload = JSON.parse(body); }
-    catch(e) { res.writeHead(400); res.end(JSON.stringify({error:'Ongeldige JSON.'})); return; }
+    try { payload = JSON.parse(body); } catch(e) { res.writeHead(400); res.end(JSON.stringify({error:'Ongeldige JSON.'})); return; }
 
-    if (SECRET && payload.secret !== SECRET) {
-      res.writeHead(403); res.end(JSON.stringify({error:'Toegang geweigerd.'})); return;
-    }
+    if (SECRET && payload.secret !== SECRET) { res.writeHead(403); res.end(JSON.stringify({error:'Toegang geweigerd.'})); return; }
     const { username, password, force_refresh } = payload;
-    if (!username || !password) {
-      res.writeHead(400); res.end(JSON.stringify({error:'username en password verplicht.'})); return;
-    }
+    if (!username || !password) { res.writeHead(400); res.end(JSON.stringify({error:'username en password verplicht.'})); return; }
 
     if (req.url === '/debug') {
       try {
-        const result = await debugAfterLogin(username, password);
-        res.writeHead(200, {'Content-Type':'application/json'});
-        res.end(JSON.stringify(result));
-      } catch(err) {
-        res.writeHead(500); res.end(JSON.stringify({error: err.message}));
-      }
+        const r = await debugScrape(username, password);
+        res.writeHead(200,{'Content-Type':'application/json'}); res.end(JSON.stringify(r));
+      } catch(err) { res.writeHead(500); res.end(JSON.stringify({error:err.message})); }
       return;
     }
 
     if (req.url === '/scrape') {
       if (!force_refresh && cache && (Date.now()-cacheTime < CACHE_TTL)) {
-        res.writeHead(200,{'Content-Type':'application/json'});
-        res.end(JSON.stringify({...cache, from_cache:true})); return;
+        res.writeHead(200,{'Content-Type':'application/json'}); res.end(JSON.stringify({...cache,from_cache:true})); return;
       }
       try {
-        const result = await scrapeElit(username, password);
-        cache = result; cacheTime = Date.now();
-        res.writeHead(200,{'Content-Type':'application/json'});
-        res.end(JSON.stringify({...result, from_cache:false}));
-      } catch(err) {
-        res.writeHead(500); res.end(JSON.stringify({error:err.message, success:false}));
-      }
+        const r = await scrapeElit(username, password);
+        cache=r; cacheTime=Date.now();
+        res.writeHead(200,{'Content-Type':'application/json'}); res.end(JSON.stringify({...r,from_cache:false}));
+      } catch(err) { res.writeHead(500); res.end(JSON.stringify({error:err.message,success:false})); }
       return;
     }
 
@@ -292,7 +280,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  log('INFO', `Elit Scraper v4 actief op poort ${PORT}`);
+  log('INFO', `Elit Scraper v5 actief op poort ${PORT}`);
   if (!SECRET) log('WARN', 'Geen SECRET!');
 });
 process.on('unhandledRejection', r => log('ERROR', String(r)));
