@@ -1,6 +1,6 @@
 /**
- * Elit Scraper Service – v5
- * Navigatie: Home → Training & Stages (menu) → klik "Inschrijvingen" kaart → data ophalen
+ * Elit Scraper Service – v6
+ * Haalt ALLE lessen én ALLE stages op door elke dropdown-optie te doorlopen.
  */
 'use strict';
 
@@ -30,7 +30,6 @@ async function doLogin(page, username, password) {
   log('INFO', 'Login...');
   await page.goto(LOGIN_URL, { waitUntil: 'networkidle2', timeout: 30000 });
   await page.waitForSelector('input', { timeout: 10000 });
-
   for (const sel of ['input[name="P100_USERNAME"]','#P100_USERNAME','input[type="text"]']) {
     try { await page.waitForSelector(sel,{timeout:2000}); await page.click(sel,{clickCount:3}); await page.type(sel,username,{delay:40}); break; } catch(e){}
   }
@@ -42,119 +41,63 @@ async function doLogin(page, username, password) {
     try { await page.waitForSelector(sel,{timeout:2000}); await page.click(sel); clicked=true; break; } catch(e){}
   }
   if (!clicked) await page.keyboard.press('Enter');
-  await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 25000 });
-  if (page.url().includes('LOGIN_DESKTOP')) throw new Error('Login mislukt. Controleer gebruikersnaam en wachtwoord.');
-  log('INFO', `Ingelogd. URL: ${page.url()}`);
+  await page.waitForNavigation({ waitUntil:'networkidle2', timeout:25000 });
+  if (page.url().includes('LOGIN_DESKTOP')) throw new Error('Login mislukt.');
+  log('INFO', 'Ingelogd!');
   await wait(2000);
 }
 
 async function navigateToInschrijvingen(page) {
-  // Stap 1: klik op "Training & stages" in het linkermenu
-  log('INFO', 'Stap 1: klik Training & stages in menu...');
-  
+  // Klik Training & stages in menu
   const trainingLink = await page.evaluate(() => {
-    const links = Array.from(document.querySelectorAll('a[href]'));
-    for (const a of links) {
-      const text = (a.innerText || a.textContent || '').trim().toLowerCase();
-      const href = a.href || '';
-      if (text.includes('training') || href.includes('f?p=111:2:') || href.includes('f?p=111:1:')) {
-        return a.href;
-      }
+    for (const a of document.querySelectorAll('a[href]')) {
+      const t = (a.innerText||'').trim().toLowerCase();
+      if (t.includes('training') || a.href.includes('f?p=111:2:') || a.href.includes('f?p=111:1:')) return a.href;
     }
     return null;
   });
+  if (!trainingLink) throw new Error('Training & Stages link niet gevonden.');
+  await page.goto(trainingLink, { waitUntil:'networkidle2', timeout:30000 });
+  await wait(2000);
 
-  if (!trainingLink) throw new Error('Link naar Training & Stages niet gevonden in menu.');
-  
-  log('INFO', `Training & Stages link: ${trainingLink}`);
-  await page.goto(trainingLink, { waitUntil: 'networkidle2', timeout: 30000 });
-  await wait(2500);
-  log('INFO', `Na Training & Stages: ${page.url()}`);
-
-  // Stap 2: klik op de "Inschrijvingen" kaart (Planning sectie)
-  log('INFO', 'Stap 2: klik op Inschrijvingen kaart...');
-
+  // Klik Inschrijvingen kaart
   const clicked = await page.evaluate(() => {
-    // Zoek alle klikbare elementen met tekst "Inschrijvingen"
-    const allElements = Array.from(document.querySelectorAll('a, button, div[onclick], span[onclick]'));
-    for (const el of allElements) {
-      const text = (el.innerText || el.textContent || '').trim();
-      if (text === 'Inschrijvingen' || text.toLowerCase() === 'inschrijvingen') {
-        el.click();
-        return true;
-      }
+    for (const el of document.querySelectorAll('a,button')) {
+      if ((el.innerText||'').trim() === 'Inschrijvingen') { el.click(); return true; }
     }
     return false;
   });
-
-  if (!clicked) {
-    // Fallback: zoek link die p=111:44 bevat
-    log('WARN', 'Inschrijvingen kaart niet gevonden via tekst, zoek via href...');
-    const inschLink = await page.evaluate(() => {
-      for (const a of document.querySelectorAll('a[href]')) {
-        if (a.href.includes('p=111:44') || a.href.includes(':44:')) return a.href;
-      }
-      return null;
-    });
-    if (inschLink) {
-      log('INFO', `Inschrijvingen href: ${inschLink}`);
-      await page.goto(inschLink, { waitUntil: 'networkidle2', timeout: 30000 });
-    } else {
-      throw new Error('Knop "Inschrijvingen" niet gevonden op de Training & Stages pagina.');
-    }
-  } else {
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => wait(3000));
+  if (clicked) {
+    await page.waitForNavigation({ waitUntil:'networkidle2', timeout:20000 }).catch(() => wait(3000));
   }
-
   await wait(2500);
-  log('INFO', `Na Inschrijvingen klik: ${page.url()}`);
+  log('INFO', `Inschrijvingen pagina: ${page.url()}`);
 }
 
-async function extractAllTabs(page) {
-  let all = [];
-
-  // Lees actieve tab
-  const b1 = await extractTable(page);
-  log('INFO', `Actieve tab: ${b1.length} rijen`);
-  all = all.concat(b1);
-
-  // Zoek inactieve tabs (Lessen / Stages)
-  const inactiveTabs = await page.$$([
-    '.t-TabsRegion-items li:not(.is-active) a',
-    '.t-Tabs-item:not(.is-active) a',
-    '[role="tab"]:not([aria-selected="true"])',
-    'li.t-NavTabs-item:not(.is-active) a',
-  ].join(', '));
-
-  log('INFO', `Extra tabs: ${inactiveTabs.length}`);
-
-  for (const tab of inactiveTabs) {
-    try {
-      const txt = await page.evaluate(el => (el.innerText||el.textContent||'').trim(), tab);
-      log('INFO', `Tab klikken: "${txt}"`);
-      await tab.click();
-      await wait(2500);
-      const batch = await extractTable(page);
-      log('INFO', `Tab "${txt}": ${batch.length} rijen`);
-      all = all.concat(batch);
-    } catch(e) { log('WARN', `Tab fout: ${e.message}`); }
-  }
-
-  // Dedup
-  const seen = new Set();
-  return all.filter(r => { const k=JSON.stringify(r); if(seen.has(k)) return false; seen.add(k); return true; });
+// Haal alle opties op uit een select-dropdown
+async function getSelectOptions(page, selector) {
+  return page.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return [];
+    return Array.from(el.options)
+      .filter(o => o.value && o.value !== '')
+      .map(o => ({ value: o.value, text: o.text.trim() }));
+  }, selector);
 }
 
+// Selecteer een optie in een dropdown en wacht op refresh
+async function selectOption(page, selector, value) {
+  await page.select(selector, value);
+  await wait(2000); // wacht op APEX refresh
+}
+
+// Extraheer tabeldata van huidige view
 async function extractTable(page) {
   return page.evaluate(() => {
     const rows = [];
     document.querySelectorAll('table').forEach(table => {
       const headers = [];
       table.querySelectorAll('thead th, thead td').forEach(h => { const t=h.innerText.trim(); if(t) headers.push(t); });
-      if (headers.length === 0) {
-        const fr = table.querySelector('tr');
-        if (fr) fr.querySelectorAll('th,td').forEach(c => { const t=c.innerText.trim(); if(t) headers.push(t); });
-      }
       if (headers.length < 2) return;
       table.querySelectorAll('tbody tr').forEach(tr => {
         const cells = tr.querySelectorAll('td');
@@ -168,9 +111,21 @@ async function extractTable(page) {
   });
 }
 
+// Haal de naam van de geselecteerde optie op
+async function getSelectedLabel(page, selector) {
+  return page.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return '';
+    const opt = el.options[el.selectedIndex];
+    return opt ? opt.text.trim() : '';
+  }, selector);
+}
+
 async function scrapeElit(username, password) {
   log('INFO', `Scrape starten voor: ${username}`);
   const browser = await launchBrowser();
+  const allRegistrations = [];
+
   try {
     const page = await browser.newPage();
     await page.setViewport({ width: 1440, height: 900 });
@@ -179,12 +134,99 @@ async function scrapeElit(username, password) {
     await doLogin(page, username, password);
     await navigateToInschrijvingen(page);
 
-    const allData = await extractAllTabs(page);
-    log('INFO', `Totaal: ${allData.length} rijen`);
+    // ── TAB 1: Lessen ──────────────────────────────────
+    log('INFO', 'Verwerken: Lessen tab');
 
-    const htmlFallback = allData.length === 0 ? await page.content() : null;
+    // Zoek de eerste dropdown (Lesaanbod)
+    const lessenSelectors = [
+      'select[name*="P44_"]',
+      'select[id*="P44_"]',
+      'select',
+    ];
+
+    let lesaanbodSel = null;
+    for (const sel of lessenSelectors) {
+      const opts = await getSelectOptions(page, sel);
+      if (opts.length > 0) { lesaanbodSel = sel; break; }
+    }
+
+    if (lesaanbodSel) {
+      const lesOptions = await getSelectOptions(page, lesaanbodSel);
+      log('INFO', `Lesaanbod opties: ${lesOptions.length}`);
+
+      for (const opt of lesOptions) {
+        log('INFO', `Lesaanbod: ${opt.text}`);
+        await selectOption(page, lesaanbodSel, opt.value);
+        const rows = await extractTable(page);
+        log('INFO', `  → ${rows.length} lessen-inschrijvingen`);
+        // Voeg lesaanbod-naam toe aan elke rij
+        rows.forEach(r => { r['__lesaanbod'] = opt.text; r['__type'] = 'les'; });
+        allRegistrations.push(...rows);
+      }
+    } else {
+      // Geen dropdown gevonden, haal gewoon de huidige data op
+      const rows = await extractTable(page);
+      rows.forEach(r => { r['__type'] = 'les'; });
+      allRegistrations.push(...rows);
+      log('INFO', `Lessen (geen dropdown): ${rows.length} rijen`);
+    }
+
+    // ── TAB 2: Stages ──────────────────────────────────
+    log('INFO', 'Verwerken: Stages tab');
+
+    // Klik op de Stages tab
+    const stagesClicked = await page.evaluate(() => {
+      const tabs = Array.from(document.querySelectorAll('a,button,[role="tab"]'));
+      for (const el of tabs) {
+        const t = (el.innerText||el.textContent||'').trim().toLowerCase();
+        if (t === 'stages' || t.includes('stage')) { el.click(); return true; }
+      }
+      return false;
+    });
+
+    if (stagesClicked) {
+      await wait(3000);
+      log('INFO', `Stages tab geklikt, URL: ${page.url()}`);
+
+      // Zoek stage-aanbod dropdown
+      let stageSelOpt = null;
+      for (const sel of lessenSelectors) {
+        const opts = await getSelectOptions(page, sel);
+        if (opts.length > 0) { stageSelOpt = sel; break; }
+      }
+
+      if (stageSelOpt) {
+        const stageOptions = await getSelectOptions(page, stageSelOpt);
+        log('INFO', `Stage-aanbod opties: ${stageOptions.length}`);
+
+        for (const opt of stageOptions) {
+          log('INFO', `Stage-aanbod: ${opt.text}`);
+          await selectOption(page, stageSelOpt, opt.value);
+          const rows = await extractTable(page);
+          log('INFO', `  → ${rows.length} stage-inschrijvingen`);
+          rows.forEach(r => { r['__stageaanbod'] = opt.text; r['__type'] = 'stage'; });
+          allRegistrations.push(...rows);
+        }
+      } else {
+        const rows = await extractTable(page);
+        rows.forEach(r => { r['__type'] = 'stage'; });
+        allRegistrations.push(...rows);
+        log('INFO', `Stages (geen dropdown): ${rows.length} rijen`);
+      }
+    } else {
+      log('WARN', 'Stages tab niet gevonden');
+    }
+
+    log('INFO', `Totaal: ${allRegistrations.length} inschrijvingen`);
     await browser.close();
-    return { success: true, registrations: allData, html_fallback: htmlFallback, url: page.url(), count: allData.length };
+
+    return {
+      success: true,
+      registrations: allRegistrations,
+      html_fallback: null,
+      count: allRegistrations.length,
+    };
+
   } catch(err) {
     log('ERROR', err.message);
     try { await browser.close(); } catch(e) {}
@@ -198,39 +240,28 @@ async function debugScrape(username, password) {
     const page = await browser.newPage();
     await page.setViewport({ width: 1440, height: 900 });
     await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-
     await doLogin(page, username, password);
-    const screenshotLogin = await page.screenshot({ encoding: 'base64' });
-    const urlLogin = page.url();
+    const screenshotLogin = await page.screenshot({ encoding:'base64' });
     const allLinks = await page.evaluate(() =>
-      Array.from(document.querySelectorAll('a[href]')).map(a => ({
-        text: (a.innerText||a.textContent||'').trim(), href: a.href
-      })).filter(l=>l.text||l.href).slice(0,50)
+      Array.from(document.querySelectorAll('a[href]')).map(a => ({ text:(a.innerText||'').trim(), href:a.href })).slice(0,50)
     );
-
-    let navSuccess = false, screenshotNav = null, urlNav = null, tablesNav = [], bodyNav = '', errorMsg = '';
+    let screenshotNav=null, urlNav=null, tablesNav=[], bodyNav='', navError='';
     try {
       await navigateToInschrijvingen(page);
-      navSuccess = true;
-      screenshotNav = await page.screenshot({ encoding: 'base64' });
+      screenshotNav = await page.screenshot({ encoding:'base64' });
       urlNav = page.url();
-      bodyNav = await page.evaluate(() => document.body.innerText.slice(0, 800));
+      bodyNav = await page.evaluate(() => document.body.innerText.slice(0,800));
       tablesNav = await page.evaluate(() =>
         Array.from(document.querySelectorAll('table')).map(t => ({
           rows: t.querySelectorAll('tr').length,
           headers: Array.from(t.querySelectorAll('th')).map(th=>th.innerText.trim()),
         }))
       );
-    } catch(e) {
-      errorMsg = e.message;
-      screenshotNav = await page.screenshot({ encoding: 'base64' });
-      urlNav = page.url();
-    }
-
+    } catch(e) { navError = e.message; screenshotNav = await page.screenshot({encoding:'base64'}); urlNav=page.url(); }
     await browser.close();
-    return { success: true, url_login: urlLogin, screenshot_login: screenshotLogin, all_links: allLinks,
-             nav_success: navSuccess, nav_error: errorMsg, url_nav: urlNav, screenshot_nav: screenshotNav,
-             body_nav: bodyNav, tables_nav: tablesNav };
+    return { success:true, url_login:page.url(), screenshot_login:screenshotLogin, all_links:allLinks,
+             nav_success:!navError, nav_error:navError, url_nav:urlNav, screenshot_nav:screenshotNav,
+             body_nav:bodyNav, tables_nav:tablesNav };
   } catch(err) {
     try { await browser.close(); } catch(e) {}
     throw err;
@@ -239,48 +270,44 @@ async function debugScrape(username, password) {
 
 // HTTP Server
 const server = http.createServer(async (req, res) => {
-  if (req.method === 'GET' && req.url === '/health') {
+  if (req.method==='GET' && req.url==='/health') {
     res.writeHead(200,{'Content-Type':'application/json'});
-    res.end(JSON.stringify({status:'ok',version:'5.0'})); return;
+    res.end(JSON.stringify({status:'ok',version:'6.0'})); return;
   }
-  if (req.method !== 'POST') { res.writeHead(404); res.end(JSON.stringify({error:'Not found'})); return; }
+  if (req.method!=='POST') { res.writeHead(404); res.end(JSON.stringify({error:'Not found'})); return; }
 
-  let body = '';
-  req.on('data', chunk => { body += chunk; });
+  let body='';
+  req.on('data', chunk => { body+=chunk; });
   req.on('end', async () => {
     let payload;
-    try { payload = JSON.parse(body); } catch(e) { res.writeHead(400); res.end(JSON.stringify({error:'Ongeldige JSON.'})); return; }
+    try { payload=JSON.parse(body); } catch(e) { res.writeHead(400); res.end(JSON.stringify({error:'Ongeldige JSON.'})); return; }
+    if (SECRET && payload.secret!==SECRET) { res.writeHead(403); res.end(JSON.stringify({error:'Toegang geweigerd.'})); return; }
+    const {username,password,force_refresh}=payload;
+    if (!username||!password) { res.writeHead(400); res.end(JSON.stringify({error:'username en password verplicht.'})); return; }
 
-    if (SECRET && payload.secret !== SECRET) { res.writeHead(403); res.end(JSON.stringify({error:'Toegang geweigerd.'})); return; }
-    const { username, password, force_refresh } = payload;
-    if (!username || !password) { res.writeHead(400); res.end(JSON.stringify({error:'username en password verplicht.'})); return; }
-
-    if (req.url === '/debug') {
-      try {
-        const r = await debugScrape(username, password);
-        res.writeHead(200,{'Content-Type':'application/json'}); res.end(JSON.stringify(r));
-      } catch(err) { res.writeHead(500); res.end(JSON.stringify({error:err.message})); }
+    if (req.url==='/debug') {
+      try { const r=await debugScrape(username,password); res.writeHead(200,{'Content-Type':'application/json'}); res.end(JSON.stringify(r)); }
+      catch(err) { res.writeHead(500); res.end(JSON.stringify({error:err.message})); }
       return;
     }
 
-    if (req.url === '/scrape') {
-      if (!force_refresh && cache && (Date.now()-cacheTime < CACHE_TTL)) {
+    if (req.url==='/scrape') {
+      if (!force_refresh && cache && (Date.now()-cacheTime<CACHE_TTL)) {
         res.writeHead(200,{'Content-Type':'application/json'}); res.end(JSON.stringify({...cache,from_cache:true})); return;
       }
       try {
-        const r = await scrapeElit(username, password);
+        const r=await scrapeElit(username,password);
         cache=r; cacheTime=Date.now();
         res.writeHead(200,{'Content-Type':'application/json'}); res.end(JSON.stringify({...r,from_cache:false}));
       } catch(err) { res.writeHead(500); res.end(JSON.stringify({error:err.message,success:false})); }
       return;
     }
-
     res.writeHead(404); res.end(JSON.stringify({error:'Endpoint niet gevonden.'}));
   });
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-  log('INFO', `Elit Scraper v5 actief op poort ${PORT}`);
-  if (!SECRET) log('WARN', 'Geen SECRET!');
+server.listen(PORT,'0.0.0.0',()=>{
+  log('INFO',`Elit Scraper v6 actief op poort ${PORT}`);
+  if(!SECRET) log('WARN','Geen SECRET!');
 });
-process.on('unhandledRejection', r => log('ERROR', String(r)));
+process.on('unhandledRejection',r=>log('ERROR',String(r)));
