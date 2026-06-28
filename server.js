@@ -1,6 +1,6 @@
 /**
- * Elit Scraper Service – v7
- * Robuuste dropdown-detectie voor zowel Lessen als Stages.
+ * Elit Scraper Service – v8
+ * Gebruikt exacte APEX selector-namen uit debug resultaat.
  */
 'use strict';
 
@@ -49,8 +49,7 @@ async function doLogin(page, username, password) {
 async function goToInschrijvingen(page) {
   const trainingLink = await page.evaluate(() => {
     for (const a of document.querySelectorAll('a[href]')) {
-      const t=(a.innerText||'').trim().toLowerCase();
-      if (t.includes('training')) return a.href;
+      if ((a.innerText||'').trim().toLowerCase().includes('training')) return a.href;
     }
     return null;
   });
@@ -68,29 +67,37 @@ async function goToInschrijvingen(page) {
   log('INFO',`Inschrijvingen: ${page.url()}`);
 }
 
-// Vind de EERSTE select met meerdere opties (het aanbod-dropdown)
-async function findMainSelect(page) {
-  const info = await page.evaluate(() => {
-    const selects = Array.from(document.querySelectorAll('select'));
-    for (const sel of selects) {
-      const opts = Array.from(sel.options).filter(o => o.value && o.value !== '' && o.text.trim() !== '- Selecteer -');
-      if (opts.length > 0) {
-        return {
-          id:    sel.id,
-          name:  sel.name,
-          selector: sel.id ? `#${sel.id}` : `select[name="${sel.name}"]`,
-          options: opts.map(o => ({ value: o.value, text: o.text.trim() })),
-        };
-      }
-    }
-    return null;
-  });
-  return info;
+// Haal opties op uit een select (filter lege/selecteer opties)
+async function getOptions(page, selectId) {
+  return page.evaluate((id) => {
+    const el = document.getElementById(id);
+    if (!el) return [];
+    return Array.from(el.options)
+      .filter(o => o.value && o.value !== '' && !o.text.includes('Selecteer'))
+      .map(o => ({ value: o.value, text: o.text.trim() }));
+  }, selectId);
 }
 
-async function extractTable(page, label, type) {
-  const rows = await page.evaluate(() => {
-    const results = [];
+// Selecteer optie en wacht op APEX refresh
+async function selectAndWait(page, selectId, value) {
+  await page.evaluate((id, val) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.value = val;
+    // Trigger APEX change event
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    // Ook jQuery trigger voor APEX
+    if (window.apex && apex.item) {
+      try { apex.item(id).setValue(val, null, true); } catch(e) {}
+    }
+  }, selectId, value);
+  await wait(2500); // wacht op APEX dynamic action
+}
+
+// Extraheer tabelrijen
+async function extractTable(page) {
+  return page.evaluate(() => {
+    const rows = [];
     document.querySelectorAll('table').forEach(table => {
       const headers = [];
       table.querySelectorAll('thead th, thead td').forEach(h => { const t=h.innerText.trim(); if(t) headers.push(t); });
@@ -100,39 +107,11 @@ async function extractTable(page, label, type) {
         if (cells.length < 2) return;
         const obj = {};
         cells.forEach((td,i) => { obj[headers[i]||'col_'+i] = td.innerText.trim(); });
-        if (Object.values(obj).filter(v=>v).length >= 2) results.push(obj);
+        if (Object.values(obj).filter(v=>v).length >= 2) rows.push(obj);
       });
     });
-    return results;
-  });
-  rows.forEach(r => { r['__label'] = label; r['__type'] = type; });
-  return rows;
-}
-
-async function scrapeTab(page, type) {
-  const all = [];
-
-  const mainSel = await findMainSelect(page);
-  if (!mainSel) {
-    log('WARN', `Geen dropdown gevonden voor tab: ${type}`);
-    const rows = await extractTable(page, '', type);
     return rows;
-  }
-
-  log('INFO', `Dropdown gevonden: ${mainSel.selector} met ${mainSel.options.length} opties`);
-  mainSel.options.forEach(o => log('INFO', `  - ${o.text} (${o.value})`));
-
-  for (const opt of mainSel.options) {
-    log('INFO', `Selecteer: ${opt.text}`);
-    await page.select(mainSel.selector, opt.value);
-    await wait(2500); // wacht op APEX dynamische refresh
-
-    const rows = await extractTable(page, opt.text, type);
-    log('INFO', `  → ${rows.length} rijen`);
-    all.push(...rows);
-  }
-
-  return all;
+  });
 }
 
 async function scrapeElit(username, password) {
@@ -148,55 +127,124 @@ async function scrapeElit(username, password) {
     await doLogin(page, username, password);
     await goToInschrijvingen(page);
 
-    // ── Lessen (actieve tab) ───────────────────────────
-    log('INFO', '=== TAB: LESSEN ===');
-    const lessen = await scrapeTab(page, 'les');
-    log('INFO', `Lessen totaal: ${lessen.length}`);
-    allData.push(...lessen);
+    // ══════════════════════════════════════════════════
+    // TAB 1: LESSEN
+    // Selector: P44_LES_SCHEMA_ID_LES (lesaanbod)
+    // ══════════════════════════════════════════════════
+    log('INFO', '=== LESSEN ===');
+    const lesOptions = await getOptions(page, 'P44_LES_SCHEMA_ID_LES');
+    log('INFO', `Lesaanbod opties: ${lesOptions.length} → ${lesOptions.map(o=>o.text).join(', ')}`);
 
-    // ── Stages tab klikken ─────────────────────────────
-    log('INFO', '=== TAB: STAGES ===');
+    for (const opt of lesOptions) {
+      log('INFO', `Lesaanbod selecteren: "${opt.text}"`);
+      await selectAndWait(page, 'P44_LES_SCHEMA_ID_LES', opt.value);
 
-    // Probeer via tekst "Stages" te klikken
-    const stagesTabClicked = await page.evaluate(() => {
-      // Zoek link/button met exact "Stages"
-      const candidates = Array.from(document.querySelectorAll('a, button, [role="tab"], li'));
-      for (const el of candidates) {
-        const t = (el.innerText||el.textContent||'').trim();
-        if (t === 'Stages') {
-          // Als het een <li> is, zoek de <a> erin
-          const a = el.tagName === 'A' ? el : el.querySelector('a');
-          if (a) { a.click(); return 'link:'+a.href; }
-          el.click(); return 'el:'+el.tagName;
+      // Haal alle doelgroepen op voor dit lesaanbod
+      const doelgroepOptions = await getOptions(page, 'P44_LES_SCHEMA_FORMULE_ID_LES');
+      log('INFO', `  Doelgroepen: ${doelgroepOptions.length}`);
+
+      if (doelgroepOptions.length === 0) {
+        // Geen subfilter, haal direct de tabel op
+        const rows = await extractTable(page);
+        rows.forEach(r => { r['__type']='les'; r['__lesaanbod']=opt.text; });
+        log('INFO', `  → ${rows.length} rijen`);
+        allData.push(...rows);
+      } else {
+        // Loop door doelgroepen
+        for (const dg of doelgroepOptions) {
+          await selectAndWait(page, 'P44_LES_SCHEMA_FORMULE_ID_LES', dg.value);
+          const rows = await extractTable(page);
+          rows.forEach(r => { r['__type']='les'; r['__lesaanbod']=opt.text; });
+          log('INFO', `  Doelgroep "${dg.text}": ${rows.length} rijen`);
+          allData.push(...rows);
         }
+      }
+    }
+
+    if (lesOptions.length === 0) {
+      // Geen dropdown, pak gewoon de huidige data
+      const rows = await extractTable(page);
+      rows.forEach(r => { r['__type']='les'; });
+      allData.push(...rows);
+    }
+
+    // ══════════════════════════════════════════════════
+    // TAB 2: STAGES
+    // Klik "Stages" tab, dan selector P44_LES_SCHEMA_ID_STAGE
+    // ══════════════════════════════════════════════════
+    log('INFO', '=== STAGES ===');
+
+    // Klik Stages tab via href
+    const stagesHref = await page.evaluate(() => {
+      for (const el of document.querySelectorAll('a,[role="tab"]')) {
+        const t=(el.innerText||el.textContent||'').trim();
+        if (t==='Stages') return el.href || null;
       }
       return null;
     });
 
-    log('INFO', `Stages tab click: ${stagesTabClicked}`);
-
-    if (stagesTabClicked) {
-      // Als het een href was, navigeer er direct naartoe
-      if (stagesTabClicked.startsWith('link:http')) {
-        const href = stagesTabClicked.replace('link:','');
-        await page.goto(href, {waitUntil:'networkidle2',timeout:30000});
-      } else {
-        await page.waitForNavigation({waitUntil:'networkidle2',timeout:15000}).catch(()=>wait(3000));
-      }
+    if (stagesHref && stagesHref.startsWith('http')) {
+      log('INFO', `Stages href: ${stagesHref}`);
+      await page.goto(stagesHref, {waitUntil:'networkidle2',timeout:30000});
       await wait(3000);
-      log('INFO', `Na Stages tab: ${page.url()}`);
-
-      const stages = await scrapeTab(page, 'stage');
-      log('INFO', `Stages totaal: ${stages.length}`);
-      allData.push(...stages);
     } else {
-      log('WARN', 'Stages tab niet gevonden!');
+      // Klik via JS
+      await page.evaluate(() => {
+        for (const el of document.querySelectorAll('a,[role="tab"],li')) {
+          if ((el.innerText||el.textContent||'').trim()==='Stages') { el.click(); return; }
+        }
+      });
+      await page.waitForNavigation({waitUntil:'networkidle2',timeout:15000}).catch(()=>wait(3000));
+      await wait(2000);
     }
 
-    log('INFO', `TOTAAL: ${allData.length} inschrijvingen`);
-    await browser.close();
+    log('INFO', `Stages pagina: ${page.url()}`);
 
-    return { success:true, registrations:allData, count:allData.length };
+    // Loop door alle stage-aanboden: P44_LES_SCHEMA_ID_STAGE
+    const stageOptions = await getOptions(page, 'P44_LES_SCHEMA_ID_STAGE');
+    log('INFO', `Stage-aanbod opties: ${stageOptions.length} → ${stageOptions.map(o=>o.text).join(', ')}`);
+
+    for (const opt of stageOptions) {
+      log('INFO', `Stage selecteren: "${opt.text}"`);
+      await selectAndWait(page, 'P44_LES_SCHEMA_ID_STAGE', opt.value);
+
+      // Optioneel: loop ook door doelgroepen (P44_LES_SCHEMA_FORMULE_ID_STAGE)
+      const dgOptions = await getOptions(page, 'P44_LES_SCHEMA_FORMULE_ID_STAGE');
+      log('INFO', `  Doelgroepen: ${dgOptions.length}`);
+
+      if (dgOptions.length === 0) {
+        const rows = await extractTable(page);
+        rows.forEach(r => { r['__type']='stage'; r['__stageaanbod']=opt.text; });
+        log('INFO', `  → ${rows.length} rijen`);
+        allData.push(...rows);
+      } else {
+        for (const dg of dgOptions) {
+          await selectAndWait(page, 'P44_LES_SCHEMA_FORMULE_ID_STAGE', dg.value);
+          const rows = await extractTable(page);
+          rows.forEach(r => { r['__type']='stage'; r['__stageaanbod']=opt.text; });
+          log('INFO', `  Doelgroep "${dg.text}": ${rows.length} rijen`);
+          allData.push(...rows);
+        }
+      }
+    }
+
+    if (stageOptions.length === 0) {
+      const rows = await extractTable(page);
+      rows.forEach(r => { r['__type']='stage'; });
+      allData.push(...rows);
+    }
+
+    // Dedup op lidnummer + aanbod + type
+    const seen = new Set();
+    const deduped = allData.filter(r => {
+      const key = (r['__type']||'') + '|' + (r['__stageaanbod']||r['__lesaanbod']||'') + '|' + (r['Lidnummer']||'') + '|' + (r['Doelgroep']||'');
+      if (seen.has(key)) return false;
+      seen.add(key); return true;
+    });
+
+    log('INFO', `TOTAAL: ${deduped.length} unieke inschrijvingen (${allData.length} voor dedup)`);
+    await browser.close();
+    return { success:true, registrations:deduped, count:deduped.length };
 
   } catch(err) {
     log('ERROR', err.message);
@@ -212,53 +260,43 @@ async function debugScrape(username, password) {
     await page.setViewport({width:1440,height:900});
     await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
     await doLogin(page, username, password);
-    const sc1 = await page.screenshot({encoding:'base64'});
     await goToInschrijvingen(page);
     const sc2 = await page.screenshot({encoding:'base64'});
-
-    // Analyseer selects op de pagina
-    const selectInfo = await page.evaluate(() => {
-      return Array.from(document.querySelectorAll('select')).map(s => ({
-        id: s.id, name: s.name,
-        options: Array.from(s.options).map(o => ({v:o.value,t:o.text.trim()})),
-      }));
-    });
-
-    // Klik stages tab
+    const selects_lessen = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('select')).map(s => ({
+        id:s.id, name:s.name,
+        options:Array.from(s.options).map(o=>({v:o.value,t:o.text.trim()})),
+      }))
+    );
     await page.evaluate(() => {
-      for (const el of document.querySelectorAll('a,button,[role="tab"]')) {
+      for (const el of document.querySelectorAll('a,[role="tab"]')) {
         if ((el.innerText||'').trim()==='Stages') { el.click(); return; }
       }
     });
     await wait(3000);
     const sc3 = await page.screenshot({encoding:'base64'});
-    const selectInfoStages = await page.evaluate(() => {
-      return Array.from(document.querySelectorAll('select')).map(s => ({
+    const selects_stages = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('select')).map(s => ({
         id:s.id, name:s.name,
         options:Array.from(s.options).map(o=>({v:o.value,t:o.text.trim()})),
-      }));
-    });
-
+      }))
+    );
     await browser.close();
-    return { success:true, screenshot_login:sc1, screenshot_lessen:sc2, screenshot_stages:sc3,
-             selects_lessen:selectInfo, selects_stages:selectInfoStages, url:page.url() };
-  } catch(err) {
-    try { await browser.close(); } catch(e) {}
-    throw err;
-  }
+    return { success:true, screenshot_lessen:sc2, screenshot_stages:sc3,
+             selects_lessen, selects_stages, url:page.url() };
+  } catch(err) { try{await browser.close();}catch(e){} throw err; }
 }
 
 const server = http.createServer(async (req,res) => {
-  if (req.method==='GET'&&req.url==='/health') { res.writeHead(200,{'Content-Type':'application/json'}); res.end(JSON.stringify({status:'ok',version:'7.0'})); return; }
+  if (req.method==='GET'&&req.url==='/health') { res.writeHead(200,{'Content-Type':'application/json'}); res.end(JSON.stringify({status:'ok',version:'8.0'})); return; }
   if (req.method!=='POST') { res.writeHead(404); res.end(JSON.stringify({error:'Not found'})); return; }
   let body='';
-  req.on('data',chunk=>{body+=chunk;});
+  req.on('data',c=>{body+=c;});
   req.on('end',async()=>{
     let p; try{p=JSON.parse(body);}catch(e){res.writeHead(400);res.end(JSON.stringify({error:'Bad JSON'}));return;}
-    if(SECRET&&p.secret!==SECRET){res.writeHead(403);res.end(JSON.stringify({error:'Toegang geweigerd.'}));return;}
+    if(SECRET&&p.secret!==SECRET){res.writeHead(403);res.end(JSON.stringify({error:'Geweigerd.'}));return;}
     const{username,password,force_refresh}=p;
     if(!username||!password){res.writeHead(400);res.end(JSON.stringify({error:'Credentials verplicht.'}));return;}
-
     if(req.url==='/debug'){
       try{const r=await debugScrape(username,password);res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(r));}
       catch(err){res.writeHead(500);res.end(JSON.stringify({error:err.message}));}
@@ -278,7 +316,7 @@ const server = http.createServer(async (req,res) => {
 });
 
 server.listen(PORT,'0.0.0.0',()=>{
-  log('INFO',`Elit Scraper v7 op poort ${PORT}`);
+  log('INFO',`Elit Scraper v8 op poort ${PORT}`);
   if(!SECRET) log('WARN','Geen SECRET!');
 });
 process.on('unhandledRejection',r=>log('ERROR',String(r)));
