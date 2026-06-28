@@ -1,0 +1,15 @@
+{
+  "name": "elit-scraper-railway",
+  "version": "1.0.0",
+  "description": "Headless browser scraper voor Elit Tennis Vlaanderen",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "puppeteer": "^21.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

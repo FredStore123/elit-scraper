@@ -1,0 +1,41 @@
+# Railway gebruikt Nixpacks om de container te bouwen.
+# Dit bestand zorgt dat alle Chromium-afhankelijkheden aanwezig zijn.
+
+[phases.setup]
+nixPkgs = [
+  "chromium",
+  "nss",
+  "nspr",
+  "atk",
+  "cups",
+  "dbus",
+  "expat",
+  "libdrm",
+  "libxkbcommon",
+  "mesa",
+  "libGL",
+  "alsa-lib",
+  "xorg.libX11",
+  "xorg.libXcomposite",
+  "xorg.libXdamage",
+  "xorg.libXext",
+  "xorg.libXfixes",
+  "xorg.libXrandr",
+  "xorg.libxcb",
+  "xorg.libXcursor",
+  "xorg.libXi",
+  "xorg.libXrender",
+  "xorg.libXtst",
+  "xorg.libXScrnSaver",
+  "gtk3",
+  "pango",
+  "cairo",
+  "gdk-pixbuf",
+  "glib",
+]
+
+[phases.build]
+cmds = ["npm install"]
+
+[start]
+cmd = "node server.js"
