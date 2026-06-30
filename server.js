@@ -102,30 +102,83 @@ async function getOptions(page, id) {
 
 async function selectAndWait(page, id, value) {
   const selector = '#' + id;
+
+  // Stap 1: gebruik UITSLUITEND page.select() — dit triggert de native browser
+  // 'change' event op de juiste manier, wat APEX dynamic actions detecteren.
+  // GEEN apex.item().setValue() ernaast, want dat veroorzaakt dubbele/conflicterende
+  // events die de echte AJAX-refresh kunnen annuleren.
   try {
-    await page.select(selector, value);
+    const selectedValues = await page.select(selector, value);
+    log('INFO', `  page.select() geslaagd, teruggegeven waarden: ${JSON.stringify(selectedValues)}`);
   } catch (e) {
-    log('WARN', `page.select() mislukt voor ${id}: ${e.message}`);
+    log('WARN', `page.select() mislukt voor ${id}: ${e.message}, gebruik fallback`);
     await page.evaluate((id,val) => {
       const el = document.getElementById(id);
-      if (el) { el.value = val; el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); }
+      if (el) {
+        el.value = val;
+        el.dispatchEvent(new Event('change',{bubbles:true}));
+      }
     }, id, value);
   }
-  await page.evaluate((id,val) => {
-    try { if (window.apex && apex.item) apex.item(id).setValue(val); } catch(e) {}
-  }, id, value).catch(()=>{});
-  await page.waitForNetworkIdle({ idleTime: 1000, timeout: 10000 }).catch(() => {});
-  await wait(1500);
+
+  // Verifieer dat de waarde echt is doorgevoerd in de DOM
+  const actualValue = await page.evaluate(id => document.getElementById(id)?.value, id);
+  if (actualValue !== value) {
+    log('WARN', `  Waarde mismatch! Verwacht=${value}, werkelijk=${actualValue}`);
+  }
+
+  // Wacht op APEX's AJAX-refresh: eerst op netwerk-activiteit, dan extra marge
+  await page.waitForNetworkIdle({ idleTime: 1200, timeout: 12000 }).catch(() => {
+    log('WARN', '  waitForNetworkIdle timeout (mogelijk geen AJAX-call gestart)');
+  });
+  await wait(2000);
 }
 
 async function extractTable(page) {
-  return page.evaluate(()=>{
+  const result = await page.evaluate(()=>{
     const rows=[];
+    const debugInfo = { tablesFound: 0, tableDetails: [] };
+
     document.querySelectorAll('table').forEach(table=>{
+      debugInfo.tablesFound++;
       const headers=[];
+
+      // Probeer headers op meerdere manieren te vinden
       table.querySelectorAll('thead th,thead td').forEach(h=>{const t=h.innerText.trim();if(t)headers.push(t);});
+
+      // Fallback 1: th overal in de tabel (niet alleen thead)
+      if (headers.length === 0) {
+        table.querySelectorAll('th').forEach(h=>{const t=h.innerText.trim();if(t)headers.push(t);});
+      }
+
+      // Fallback 2: eerste rij als header (ongeacht td/th)
+      if (headers.length === 0) {
+        const firstRow = table.querySelector('tr');
+        if (firstRow) {
+          firstRow.querySelectorAll('td,th').forEach(c=>{const t=c.innerText.trim();if(t)headers.push(t);});
+        }
+      }
+
+      debugInfo.tableDetails.push({
+        headerCount: headers.length,
+        headers: headers.slice(0,5),
+        totalRows: table.querySelectorAll('tr').length,
+        hasThead: !!table.querySelector('thead'),
+        hasTbody: !!table.querySelector('tbody'),
+        className: table.className,
+        id: table.id,
+      });
+
       if(headers.length<2) return;
-      table.querySelectorAll('tbody tr').forEach(tr=>{
+
+      // Probeer tbody tr, anders alle tr behalve de eerste (header)
+      let dataRows = table.querySelectorAll('tbody tr');
+      if (dataRows.length === 0) {
+        const allRows = Array.from(table.querySelectorAll('tr'));
+        dataRows = allRows.slice(1); // skip eerste rij (header)
+      }
+
+      dataRows.forEach(tr=>{
         const cells=tr.querySelectorAll('td');
         if(cells.length<2) return;
         const obj={};
@@ -133,8 +186,17 @@ async function extractTable(page) {
         if(Object.values(obj).filter(v=>v).length>=2) rows.push(obj);
       });
     });
-    return rows;
+
+    return { rows, debugInfo };
   });
+
+  if (result.rows.length === 0 && result.debugInfo.tablesFound > 0) {
+    log('WARN', `extractTable: 0 rijen maar ${result.debugInfo.tablesFound} tabellen gevonden. Details: ${JSON.stringify(result.debugInfo.tableDetails)}`);
+  } else if (result.debugInfo.tablesFound === 0) {
+    log('WARN', `extractTable: GEEN tabellen gevonden op de pagina (URL: ${page.url()})`);
+  }
+
+  return result.rows;
 }
 
 function dedupe(rows) {
