@@ -32,6 +32,14 @@ async function launchBrowser() {
   });
 }
 
+async function disableCache(page) {
+  await page.setCacheEnabled(false);
+  await page.setExtraHTTPHeaders({
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    'Pragma': 'no-cache',
+  });
+}
+
 async function doLogin(page, username, password) {
   await page.goto(LOGIN_URL, {waitUntil:'networkidle2',timeout:30000});
   await page.waitForSelector('input',{timeout:10000});
@@ -80,14 +88,39 @@ async function getOptions(page, id) {
 }
 
 async function selectAndWait(page, id, value) {
-  await page.evaluate((id,val)=>{
-    const el=document.getElementById(id);
-    if(!el) return;
-    el.value=val;
-    el.dispatchEvent(new Event('change',{bubbles:true}));
-    try{if(window.apex&&apex.item) apex.item(id).setValue(val,null,true);}catch(e){}
-  }, id, value);
-  await wait(1800);
+  const selector = '#' + id;
+
+  // Gebruik Puppeteer's eigen select() — simuleert een ECHTE browser-interactie
+  // (klik + native select + change event), in tegenstelling tot el.value= wat
+  // APEX dynamic actions niet altijd detecteren.
+  try {
+    await page.select(selector, value);
+  } catch (e) {
+    log('WARN', `page.select() mislukt voor ${id}: ${e.message}`);
+    // Fallback: focus + keyboard, simuleert nog explicieter een gebruiker
+    await page.focus(selector);
+    await page.evaluate((id,val) => {
+      const el = document.getElementById(id);
+      if (el) {
+        el.value = val;
+        el.dispatchEvent(new Event('input', {bubbles:true}));
+        el.dispatchEvent(new Event('change', {bubbles:true}));
+      }
+    }, id, value);
+  }
+
+  // Probeer ook APEX's eigen item API te triggeren als die beschikbaar is
+  await page.evaluate((id,val) => {
+    try {
+      if (window.apex && apex.item) {
+        apex.item(id).setValue(val);
+      }
+    } catch(e) {}
+  }, id, value).catch(() => {});
+
+  // Wacht op APEX AJAX refresh (netwerk + DOM)
+  await page.waitForNetworkIdle({ idleTime: 1000, timeout: 10000 }).catch(() => {});
+  await wait(1500);
 }
 
 async function extractTable(page) {
@@ -115,6 +148,7 @@ async function runScrape(username, password, jobObj) {
 
   try {
     const page = await browser.newPage();
+    await disableCache(page);
     await page.setViewport({width:1440,height:900});
     await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
@@ -130,11 +164,18 @@ async function runScrape(username, password, jobObj) {
     for(let i=0;i<lesOptions.length;i++){
       const opt=lesOptions[i];
       jobObj.message=`Lessen: ${opt.text} (${i+1}/${lesOptions.length})`;
-      log('INFO',`Les: ${opt.text}`);
+      log('INFO',`Les selecteren: "${opt.text}" (value=${opt.value})`);
+
+      const tableCountBefore = await page.evaluate(() => document.querySelectorAll('table tbody tr').length);
       await selectAndWait(page,'P44_LES_SCHEMA_ID_LES',opt.value);
+
+      const actualValue = await page.evaluate(id => document.getElementById(id)?.value, 'P44_LES_SCHEMA_ID_LES');
+      const tableCountAfter = await page.evaluate(() => document.querySelectorAll('table tbody tr').length);
+      log('INFO',`  Select waarde: verwacht=${opt.value} werkelijk=${actualValue} | tabelrijen voor=${tableCountBefore} na=${tableCountAfter}`);
+
       const rows=await extractTable(page);
       rows.forEach(r=>{r['__type']='les';r['__lesaanbod']=opt.text;});
-      log('INFO',`  ${rows.length} rijen`);
+      log('INFO',`  → ${rows.length} rijen via extractTable`);
       allData.push(...rows);
     }
 
@@ -270,11 +311,8 @@ const server=http.createServer(async(req,res)=>{
 
     if(req.url==='/scrape'){
       // Cache check
-      if(!force_refresh&&cache&&(Date.now()-cacheTime<CACHE_TTL)){
-        res.writeHead(200,{'Content-Type':'application/json'});
-        res.end(JSON.stringify({...cache,from_cache:true}));
-        return;
-      }
+      // Cache uitgeschakeld: elke sync-aanvraag haalt altijd verse data op.
+      // (force_refresh wordt genegeerd, want we willen nooit stale data tonen)
       // Start async job
       const jid=jobId();
       jobs[jid]={status:'starting',message:'Job gestart...',result:null};
